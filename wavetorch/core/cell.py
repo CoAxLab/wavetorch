@@ -15,6 +15,8 @@ KERNEL_LAP = [[0.0,  1.0, 0.0],
               [1.0, -4.0, 1.0],
               [0.0,  1.0, 0.0]]
 
+torch.autograd.set_detect_anomaly(True)
+
 class WaveCell(torch.nn.Module):
     """The recurrent neural network cell that implements the scalar wave equation."""
 
@@ -121,7 +123,8 @@ class WaveCell(torch.nn.Module):
         if design_region is not None:
             # Use specified design region
             assert design_region.shape == (Nx, Ny), "Design region mask dims must match spatial dims"
-            self.register_buffer("design_region", design_region * (self.b_boundary == 0))
+            # self.register_buffer("design_region", design_region * (self.b_boundary == 0))
+            self.register_buffer("design_region", design_region * (self.b_boundary == 0).type(torch.uint8))
         else:
             # Use all non-PML area as the design region
             self.register_buffer("design_region", self.b_boundary == 0)
@@ -164,7 +167,7 @@ class WaveCell(torch.nn.Module):
         b_vals = pml_max * torch.linspace(0.0, 1.0, pml_N+1) ** pml_p
 
         b_x = torch.zeros(Nx, Ny)
-        b_x[0:pml_N+1,   :] = torch.flip(b_vals, [0]).repeat(Ny,1).transpose(0, 1)
+        b_x[0:pml_N+1,:] = torch.flip(b_vals, [0]).repeat(Ny,1).transpose(0, 1)
         b_x[(Nx-pml_N-1):Nx, :] = b_vals.repeat(Ny,1).transpose(0, 1)
 
         b_y = torch.zeros(Nx, Ny)
@@ -191,6 +194,7 @@ class WaveCell(torch.nn.Module):
             The distribution of the material density
             This is passed in to generate the necessary nonlinearities 
         """
+        
         dt = self.dt
 
         if self.use_satabs_nonlinearity:
@@ -203,14 +207,22 @@ class WaveCell(torch.nn.Module):
         else:
             c = c_linear
 
-        y = torch.mul((dt**(-2) + b * 0.5 * dt**(-1)).pow(-1),
+
+        y = torch.mul(
+            (dt**(-2) + b * 0.5 * dt**(-1)).pow(-1),
                       (2/dt**2*y1 - torch.mul( (dt**(-2) - b * 0.5 * dt**(-1)), y2)
                                + torch.mul(c.pow(2), conv2d(y1.unsqueeze(1), self.laplacian, padding=1).squeeze(1)))
                      )
         
         # Insert the source
-        y[:, self.src_x, self.src_y] = y[:, self.src_x, self.src_y] + x.expand_as(y[:, self.src_x, self.src_y])
+        # Orginal code (v0.1)
+        # y[:, self.src_x, self.src_y] = y[:, self.src_x, self.src_y] + x.expand_as(y[:, self.src_x, self.src_y])
         
+        # Modified for pytorch > 1 (inplace bug in orginal)
+        x_in = torch.zeros(y.size()).detach()
+        x_in[:, self.src_x, self.src_y] = x
+        
+        y = y + x_in
         return y, y, y1
 
     def forward(self, x, probe_output=True):
@@ -291,5 +303,5 @@ def setup_probe_coords(N_classes, px, py, pd, Nx, Ny, Npml):
             x = [Nx-Npml-20 for i in range(N_classes)]
 
         return x, y
-
-    raise ValueError("px = {}, py = {}, pd = {} is an invalid probe configuration".format(pd))
+    else:
+        raise ValueError("px = {}, py = {}, pd = {} is an invalid probe configuration".format(pd))
